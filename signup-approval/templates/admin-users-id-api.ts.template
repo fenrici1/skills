@@ -1,0 +1,267 @@
+/**
+ * TEMPLATE: Admin User Update/Delete API
+ * File: /app/api/admin/users/[id]/route.ts
+ *
+ * Purpose: Approve, reject, or modify users
+ *
+ * Customize:
+ * - {{VALID_ROLES}} - Your app's valid roles
+ * - {{VALID_STATUSES}} - Your app's valid statuses
+ * - Add/remove fields as needed
+ */
+
+import { createClient } from '@/lib/supabase/server';
+import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
+import { sendApprovalEmail } from '@/lib/email/user-notification-email';
+
+interface RouteParams {
+  params: Promise<{ id: string }>;
+}
+
+// Validation schema - customize roles/statuses
+const updateSchema = z.object({
+  status: z.enum(['active', 'suspended', 'pending']).optional(),
+  role: z.enum(['admin', 'user', 'readonly']).optional(), // Customize roles
+});
+
+/**
+ * PATCH /api/admin/users/[id]
+ * Update user status or role
+ */
+export async function PATCH(request: NextRequest, { params }: RouteParams) {
+  try {
+    const { id } = await params;
+    const supabase = await createClient();
+
+    // Verify current user is authenticated
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Use admin client to bypass RLS
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!serviceRoleKey) {
+      return NextResponse.json(
+        { error: 'Server configuration error' },
+        { status: 500 }
+      );
+    }
+
+    const { createClient: createAdminClient } = await import('@supabase/supabase-js');
+    const adminClient = createAdminClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      serviceRoleKey,
+      { auth: { autoRefreshToken: false, persistSession: false } }
+    );
+
+    // IMPORTANT: Use admin client for ALL profile queries
+    const { data: currentProfile } = await adminClient
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single();
+
+    if (currentProfile?.role !== 'admin') {
+      return NextResponse.json({ error: 'Admin access required' }, { status: 403 });
+    }
+
+    // Prevent self-modification
+    if (id === user.id) {
+      return NextResponse.json(
+        { error: 'Cannot modify your own account' },
+        { status: 400 }
+      );
+    }
+
+    // Parse and validate request body
+    const body = await request.json();
+    const validated = updateSchema.parse(body);
+
+    if (!validated.status && !validated.role) {
+      return NextResponse.json(
+        { error: 'No changes specified' },
+        { status: 400 }
+      );
+    }
+
+    // Get target user data (for comparison and email)
+    const { data: targetUser } = await adminClient
+      .from('profiles')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (!targetUser) {
+      return NextResponse.json({ error: 'User not found' }, { status: 404 });
+    }
+
+    // Build update object
+    const updates: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+    };
+
+    const changedFields: string[] = [];
+
+    if (validated.status && validated.status !== targetUser.status) {
+      updates.status = validated.status;
+      changedFields.push('status');
+    }
+
+    if (validated.role && validated.role !== targetUser.role) {
+      updates.role = validated.role;
+      changedFields.push('role');
+    }
+
+    if (changedFields.length === 0) {
+      return NextResponse.json(
+        { error: 'No changes detected' },
+        { status: 400 }
+      );
+    }
+
+    // Update the user
+    const { error: updateError } = await adminClient
+      .from('profiles')
+      .update(updates)
+      .eq('id', id);
+
+    if (updateError) {
+      console.error('Error updating user:', updateError);
+      return NextResponse.json(
+        { error: 'Failed to update user' },
+        { status: 500 }
+      );
+    }
+
+    // Send approval email if user was just approved (pending -> active)
+    if (validated.status === 'active' && targetUser.status === 'pending') {
+      const loginUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/login`;
+      const emailResult = await sendApprovalEmail({
+        to: targetUser.email,
+        userName: targetUser.full_name || targetUser.email.split('@')[0],
+        loginUrl,
+      });
+
+      if (!emailResult.success) {
+        console.warn('Failed to send approval email:', emailResult.error);
+        // Don't fail the request - user is still approved
+      }
+    }
+
+    // Optional: Log to audit table
+    // await supabase.from('audit_log').insert({...});
+
+    return NextResponse.json({
+      success: true,
+      message: 'User updated successfully',
+      changes: changedFields,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return NextResponse.json(
+        { error: error.errors[0].message },
+        { status: 400 }
+      );
+    }
+    console.error('PATCH /api/admin/users/[id] error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}
+
+/**
+ * DELETE /api/admin/users/[id]
+ * Delete user completely (removes from Auth and profiles)
+ */
+export async function DELETE(request: NextRequest, { params }: RouteParams) {
+  try {
+    const { id } = await params;
+    const supabase = await createClient();
+
+    // Verify current user is authenticated
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Use admin client to bypass RLS
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!serviceRoleKey) {
+      return NextResponse.json(
+        { error: 'Server configuration error' },
+        { status: 500 }
+      );
+    }
+
+    const { createClient: createAdminClient } = await import('@supabase/supabase-js');
+    const adminClient = createAdminClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      serviceRoleKey,
+      { auth: { autoRefreshToken: false, persistSession: false } }
+    );
+
+    // IMPORTANT: Use admin client for admin check
+    const { data: currentProfile } = await adminClient
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single();
+
+    if (currentProfile?.role !== 'admin') {
+      return NextResponse.json({ error: 'Admin access required' }, { status: 403 });
+    }
+
+    // Prevent self-deletion
+    if (id === user.id) {
+      return NextResponse.json(
+        { error: 'Cannot delete your own account' },
+        { status: 400 }
+      );
+    }
+
+    // Check if user exists
+    const { data: targetUser } = await adminClient
+      .from('profiles')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (!targetUser) {
+      return NextResponse.json({ error: 'User not found' }, { status: 404 });
+    }
+
+    // Delete profile first (due to foreign key constraints)
+    const { error: profileError } = await adminClient
+      .from('profiles')
+      .delete()
+      .eq('id', id);
+
+    if (profileError) {
+      console.error('Error deleting profile:', profileError);
+      return NextResponse.json(
+        { error: 'Failed to delete user profile' },
+        { status: 500 }
+      );
+    }
+
+    // Delete from Supabase Auth
+    const { error: authError } = await adminClient.auth.admin.deleteUser(id);
+
+    if (authError) {
+      console.error('Error deleting auth user:', authError);
+      // Profile is already deleted, log but don't fail
+    }
+
+    // Optional: Log to audit table
+    // await supabase.from('audit_log').insert({...});
+
+    return NextResponse.json({
+      success: true,
+      message: 'User deleted successfully',
+    });
+  } catch (error) {
+    console.error('DELETE /api/admin/users/[id] error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}

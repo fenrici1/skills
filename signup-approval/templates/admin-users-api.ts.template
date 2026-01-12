@@ -1,0 +1,69 @@
+/**
+ * TEMPLATE: Admin Users List API
+ * File: /app/api/admin/users/route.ts
+ *
+ * Purpose: List all users for admin dashboard
+ *
+ * Customize:
+ * - Add pagination if needed
+ * - Add filtering options
+ * - Adjust fields returned
+ */
+
+import { createClient } from '@/lib/supabase/server';
+import { NextRequest, NextResponse } from 'next/server';
+
+export async function GET(request: NextRequest) {
+  try {
+    const supabase = await createClient();
+
+    // Verify current user is authenticated
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Use admin client to bypass RLS
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!serviceRoleKey) {
+      return NextResponse.json(
+        { error: 'Server configuration error' },
+        { status: 500 }
+      );
+    }
+
+    const { createClient: createAdminClient } = await import('@supabase/supabase-js');
+    const adminClient = createAdminClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      serviceRoleKey,
+      { auth: { autoRefreshToken: false, persistSession: false } }
+    );
+
+    // Check if current user is admin
+    const { data: currentProfile } = await adminClient
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single();
+
+    if (currentProfile?.role !== 'admin') {
+      return NextResponse.json({ error: 'Admin access required' }, { status: 403 });
+    }
+
+    // Get all users
+    const { data: users, error } = await adminClient
+      .from('profiles')
+      .select('id, email, full_name, role, status, created_at, updated_at')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching users:', error);
+      return NextResponse.json({ error: 'Failed to fetch users' }, { status: 500 });
+    }
+
+    return NextResponse.json({ users });
+  } catch (error) {
+    console.error('GET /api/admin/users error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}

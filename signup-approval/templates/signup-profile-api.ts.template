@@ -1,0 +1,83 @@
+/**
+ * TEMPLATE: Signup Profile API Route
+ *
+ * Purpose: Create profile server-side to bypass RLS
+ *
+ * Customize:
+ * - {{DEFAULT_ROLE}} - Default role for new users
+ * - Add additional profile fields as needed
+ */
+
+import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
+
+// Validation schema
+const signupProfileSchema = z.object({
+  userId: z.string().uuid(),
+  email: z.string().email(),
+  fullName: z.string().min(1).optional(),
+});
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const validated = signupProfileSchema.parse(body);
+
+    // Get service role key for admin operations
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!serviceRoleKey) {
+      console.error('SUPABASE_SERVICE_ROLE_KEY not configured');
+      return NextResponse.json(
+        { error: 'Server configuration error' },
+        { status: 500 }
+      );
+    }
+
+    // Create admin client to bypass RLS
+    const { createClient } = await import('@supabase/supabase-js');
+    const adminClient = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      serviceRoleKey,
+      { auth: { autoRefreshToken: false, persistSession: false } }
+    );
+
+    // Create profile with pending status
+    const { error: profileError } = await adminClient
+      .from('profiles')
+      .insert({
+        id: validated.userId,
+        email: validated.email,
+        full_name: validated.fullName || null,
+        role: '{{DEFAULT_ROLE}}', // Customize: 'user', 'reviewer', etc.
+        status: 'pending',
+      });
+
+    if (profileError) {
+      // Check if profile already exists (race condition)
+      if (profileError.code === '23505') {
+        return NextResponse.json({ success: true, message: 'Profile already exists' });
+      }
+      console.error('Profile creation error:', profileError);
+      return NextResponse.json(
+        { error: 'Failed to create profile' },
+        { status: 500 }
+      );
+    }
+
+    console.log(`Signup profile created for ${validated.email}`);
+    return NextResponse.json({ success: true });
+
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return NextResponse.json(
+        { error: error.errors[0].message },
+        { status: 400 }
+      );
+    }
+    console.error('Signup profile error:', error);
+    return NextResponse.json(
+      { error: 'Internal server error' },
+      { status: 500 }
+    );
+  }
+}

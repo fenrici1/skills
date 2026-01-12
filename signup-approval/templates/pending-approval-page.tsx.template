@@ -1,0 +1,127 @@
+/**
+ * TEMPLATE: Pending Approval Page
+ *
+ * Purpose: Waiting room for users awaiting admin approval
+ *
+ * Customize:
+ * - {{APP_NAME}} - Your app name
+ * - Styling to match your design system
+ */
+
+"use client"
+
+import Link from "next/link"
+import { useEffect, useState } from "react"
+import { useRouter } from "next/navigation"
+import { createClient } from "@/lib/supabase/client"
+
+export default function PendingApprovalPage() {
+  const [userEmail, setUserEmail] = useState<string | null>(null)
+  const [checking, setChecking] = useState(false)
+  const router = useRouter()
+
+  const checkStatus = async () => {
+    setChecking(true)
+    const supabase = createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+
+    if (user) {
+      setUserEmail(user.email || null)
+
+      // Check profile status
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('status')
+        .eq('id', user.id)
+        .single()
+
+      if (profile?.status === 'active') {
+        router.push('/dashboard')
+        return
+      }
+
+      if (profile?.status === 'suspended') {
+        await supabase.auth.signOut()
+        router.push('/login')
+        return
+      }
+    }
+    setChecking(false)
+  }
+
+  useEffect(() => {
+    checkStatus()
+  }, [])
+
+  const handleLogout = async () => {
+    const supabase = createClient()
+    await supabase.auth.signOut()
+    window.location.href = '/login'
+  }
+
+  return (
+    <div className="bg-white rounded-lg shadow-xl p-8">
+      <div className="text-center">
+        <div className="w-16 h-16 bg-yellow-100 rounded-full flex items-center justify-center mx-auto mb-4">
+          <svg
+            className="w-8 h-8 text-yellow-600"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+            />
+          </svg>
+        </div>
+
+        <h2 className="text-2xl font-semibold mb-2">Account Pending Approval</h2>
+
+        {userEmail && (
+          <p className="text-gray-500 text-sm mb-4">
+            Signed in as: {userEmail}
+          </p>
+        )}
+
+        <p className="text-gray-600 mb-6">
+          Your account has been created and is awaiting administrator approval.
+          You&apos;ll be able to access {{APP_NAME}} once your account is approved.
+        </p>
+
+        <div className="bg-blue-50 rounded-lg p-4 mb-6">
+          <p className="text-sm text-blue-700">
+            An administrator will review your request shortly. If you need
+            immediate access, please contact your administrator directly.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          <button
+            onClick={checkStatus}
+            disabled={checking}
+            className="w-full bg-blue-600 text-white px-6 py-3 rounded-md hover:bg-blue-700 transition-colors font-medium disabled:opacity-50"
+          >
+            {checking ? "Checking..." : "Check Again"}
+          </button>
+
+          <button
+            onClick={handleLogout}
+            className="w-full bg-gray-100 text-gray-700 px-6 py-3 rounded-md hover:bg-gray-200 transition-colors font-medium"
+          >
+            Sign Out
+          </button>
+        </div>
+
+        <p className="mt-6 text-center text-sm text-gray-500">
+          Need a different account?{" "}
+          <Link href="/login" className="text-blue-600 hover:text-blue-700 font-medium">
+            Sign in
+          </Link>
+        </p>
+      </div>
+    </div>
+  )
+}
